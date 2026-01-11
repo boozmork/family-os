@@ -16,10 +16,8 @@ def get_db():
         # 1. Try to load from Streamlit Secrets
         if "firebase" in st.secrets:
             try:
-                # Convert the AttrDict to a normal Python dict
                 key_dict = dict(st.secrets["firebase"])
-                
-                # SAFETY NET: Fix newlines if they are escaped (e.g. \\n -> \n)
+                # SAFETY NET: Fix newlines if they are escaped
                 if "\\n" in key_dict["private_key"]:
                     key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
                 
@@ -175,7 +173,7 @@ def rate_meal(name, rating, user, style):
     })
     # Update style prefs logic here (simplified)
     fam_ref = db.collection("families").document("fam_8829_xyz")
-    data = get_data_cached() # read local first
+    data = get_data_cached() 
     prefs = data.get("style_preferences", {})
     matched = next((s for s in ALL_STYLES if style.split(" ")[0] in s), None)
     if matched:
@@ -189,7 +187,6 @@ def toggle_lock(day_name, meal_type):
     plan = data.get('current_week_plan', {})
     for d in plan.get('days', []):
         if d['day'] == day_name:
-            # Toggle logic
             d['meals'][meal_type]['locked'] = not d['meals'][meal_type].get('locked', False)
     db.collection("families").document("fam_8829_xyz").update({"current_week_plan": plan})
 
@@ -310,8 +307,13 @@ else:
                 st.caption(f"{s['store']}: £{s['total']:.2f}")
             
             st.divider()
+            
+            # 🛒 FIX: Added quantities, removed prices from individual items
+            st.write(f"**Your Items ({len(items)})**")
             for i in items:
-                st.checkbox(f"{i['item']} (£{i['est_price']:.2f})", key=i['item'])
+                # Label format: "2 pints Milk"
+                label = f"{i.get('quantity', '')} {i['item']}"
+                st.checkbox(label, key=i['item'])
                 
     with t3:
         st.json(data.get('members', []))
