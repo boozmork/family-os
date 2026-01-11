@@ -1,0 +1,11 @@
+# Security keys and secrets
+
+creds.txt
+serviceAccountKey.json
+family-os-test-firebase-adminsdk-fbsvc-2e33867842.json
+# Common Python ignores (Recommended)
+__pycache__/
+*.pyc
+venv/
+.env
+.DS_Store
