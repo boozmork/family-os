@@ -9,25 +9,20 @@ from datetime import datetime
 # --- 1. CONFIG ---
 st.set_page_config(page_title="Family OS", page_icon="🏡", layout="centered", initial_sidebar_state="collapsed")
 
-# --- 2. DATABASE CONNECTION (The Working "Fail-Safe" Version) ---
+# --- 2. DATABASE CONNECTION ---
 @st.cache_resource
 def get_db():
     if not firebase_admin._apps:
-        # 1. Try to load from Streamlit Secrets
         if "firebase" in st.secrets:
             try:
                 key_dict = dict(st.secrets["firebase"])
-                # SAFETY NET: Fix newlines if they are escaped
                 if "\\n" in key_dict["private_key"]:
                     key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
-                
                 cred = credentials.Certificate(key_dict)
                 firebase_admin.initialize_app(cred)
             except Exception as e:
                 st.error(f"❌ Secret Error: {e}")
                 return None
-        
-        # 2. Local Fallback
         else:
             try:
                 cred = credentials.Certificate("serviceAccountKey.json")
@@ -35,10 +30,8 @@ def get_db():
             except:
                 st.warning("⚠️ No database connection found.")
                 return None
-
     return firestore.client()
 
-# Initialize DB
 db = get_db()
 
 # --- 3. OPENAI SETUP ---
@@ -47,7 +40,7 @@ if "OPENAI_API_KEY" in st.secrets:
 else:
     client = OpenAI(api_key="sk-placeholder")
 
-# --- 4. DATA LOGIC (Cached) ---
+# --- 4. DATA LOGIC ---
 @st.cache_data(ttl=600)
 def get_data_cached():
     if db is None: return {}
@@ -56,7 +49,6 @@ def get_data_cached():
         if doc.exists:
             return doc.to_dict()
         else:
-            # Create default structure if new
             default = {
                 "members": [{"name": "Dad", "role": "parent"}, {"name": "Kid", "role": "child"}],
                 "kitchen_profile": {"current_inventory": ["Pasta", "Tomato Sauce"]},
@@ -74,7 +66,7 @@ def force_refresh():
         del st.session_state['family_data']
     st.session_state['family_data'] = get_data_cached()
 
-# --- 5. AGENT LOGIC (The Brains) ---
+# --- 5. AGENT LOGIC (UPDATED FOR VARIETY) ---
 ALL_STYLES = [
     "Jamie Oliver 15-Minute Meals (Quick, fresh, rustic)",
     "Ottolenghi (Middle Eastern, veg-heavy, complex spices)",
@@ -85,33 +77,50 @@ ALL_STYLES = [
     "Thai Street Food (Pad Thai, curries, zesty salads)",
     "Mediterranean Diet (Grilled fish, olive oil, salads)",
     "American Diner (Burgers, mac n cheese, ribs)",
-    "French Bistro (Steak frites, quiches, rich sauces)"
+    "French Bistro (Steak frites, quiches, rich sauces)",
+    "Indian Curry House (Rich curries, naan, tandoori)",
+    "Greek Taverna (Souvlaki, fresh salads, feta)"
 ]
 
-def pick_weekly_vibe(family_data):
+def get_style_preferences(family_data):
+    """
+    Instead of picking ONE style, we now return the data so the AI can mix it up.
+    """
     prefs = family_data.get('style_preferences', {})
     favorites = [s for s in ALL_STYLES if prefs.get(s, 0) > 2]
     disliked = [s for s in ALL_STYLES if prefs.get(s, 0) < -1]
-    neutral = [s for s in ALL_STYLES if s not in favorites and s not in disliked]
     
-    if disliked and random.random() < 0.10: 
-        return f"Focus strictly on: {random.choice(disliked)} (Revival Mode)."
-    if favorites and random.random() < 0.70:
-        return f"Focus on favorites: {random.choice(favorites)}."
-    if neutral:
-        return f"Explore: {random.choice(neutral)}."
-    return f"General crowd-pleasers: {random.choice(ALL_STYLES)}"
+    return favorites, disliked
 
 def generate_week_plan():
     data = get_data_cached()
     schedule = {"Monday": [], "Tuesday": ["Busy"], "Wednesday": [], "Thursday": [], "Friday": [], "Saturday": [], "Sunday": []}
-    theme = pick_weekly_vibe(data)
+    
+    # Get the lists, don't pick just one
+    favorites, disliked = get_style_preferences(data)
     
     prompt = f"""
-    Plan a 7-day menu.
-    THEME: {theme}
-    FAMILY: {json.dumps(data.get('members', []))}
-    SCHEDULE: {json.dumps(schedule)}
+    You are a professional family meal planner for a UK family.
+    Plan a 7-day menu (Mon-Sun).
+    
+    CRITICAL RULES FOR MEAL TYPES:
+    1. **BREAKFAST**: Must be standard UK/Western style (Toast, Cereal, Porridge, Eggs, Yoghurt, Pancakes). NO soups, rice, or dinner leftovers.
+    2. **LUNCH**: Must be "Packed Lunch" friendly (Sandwiches, Wraps, Salads, Soup) or simple weekend light meals.
+    3. **DINNER**: This is where you show off.
+    
+    CRITICAL RULES FOR VARIETY:
+    1. **DO NOT** use the same cuisine twice in a row.
+    2. **DO NOT** make the whole week one theme (e.g. No "Asian Week").
+    3. **Mix it up**: Aim for 7 different styles across 7 days.
+    
+    USER PREFERENCES:
+    - LOVES: {", ".join(favorites) if favorites else "Open to anything"}
+    - HATES (Avoid these): {", ".join(disliked) if disliked else "None"}
+    - AVAILABLE STYLES TO PICK FROM: {", ".join(ALL_STYLES)}
+    
+    SCHEDULE CONTEXT:
+    {json.dumps(schedule)}
+    (If day is 'Busy', dinner must be <20 mins).
     
     OUTPUT JSON:
     {{
@@ -119,9 +128,9 @@ def generate_week_plan():
         {{
           "day": "Monday",
           "meals": {{
-            "breakfast": {{ "name": "...", "ingredients": ["..."], "method": "...", "style_tag": "..." }},
-            "lunch": {{ "name": "...", "ingredients": ["..."], "method": "...", "style_tag": "..." }},
-            "dinner": {{ "name": "...", "ingredients": ["..."], "method": "...", "style_tag": "..." }}
+            "breakfast": {{ "name": "...", "ingredients": ["..."], "method": "...", "style_tag": "Western" }},
+            "lunch": {{ "name": "...", "ingredients": ["..."], "method": "...", "style_tag": "Packed Lunch" }},
+            "dinner": {{ "name": "...", "ingredients": ["..."], "method": "...", "style_tag": "Italian" }}
           }}
         }}
       ]
@@ -171,10 +180,12 @@ def rate_meal(name, rating, user, style):
     db.collection("families").document("fam_8829_xyz").collection("meal_history").add({
         "meal": name, "rating": rating, "user": user, "style": style, "date": datetime.now().isoformat()
     })
-    # Update style prefs logic here (simplified)
+    
     fam_ref = db.collection("families").document("fam_8829_xyz")
     data = get_data_cached() 
     prefs = data.get("style_preferences", {})
+    
+    # Fuzzy match the style tag to our master list
     matched = next((s for s in ALL_STYLES if style.split(" ")[0] in s), None)
     if matched:
         score = prefs.get(matched, 0)
@@ -226,7 +237,6 @@ with c2:
 if user.get('role') == 'child':
     st.subheader("🦖 Tonight's Dinner")
     try:
-        # Simplification: Grab Monday dinner (or adapt logic to find 'today')
         meal = data['current_week_plan']['days'][0]['meals']['dinner']
         st.success(f"**{meal['name']}**")
         st.caption(meal.get('method', 'Ask Dad!'))
@@ -261,7 +271,7 @@ else:
                     def render(m_type, m_data, d_name):
                         c1, c2 = st.columns([4,1])
                         c1.write(f"**{m_data['name']}**")
-                        # Lock button
+                        
                         is_locked = m_data.get('locked', False)
                         if c2.button("🔒" if is_locked else "🔓", key=f"l_{d_name}_{m_type}"):
                              toggle_lock(d_name, m_type)
@@ -271,7 +281,6 @@ else:
                         st.caption(m_data.get('method', ''))
                         st.text(f"Ing: {', '.join(m_data.get('ingredients', []))}")
                         
-                        # Thumbs up/down
                         b1, b2 = st.columns(2)
                         if b1.button("👍", key=f"u_{d_name}_{m_type}"):
                              rate_meal(m_data['name'], "like", user['name'], m_data.get('style_tag', 'General'))
@@ -307,11 +316,8 @@ else:
                 st.caption(f"{s['store']}: £{s['total']:.2f}")
             
             st.divider()
-            
-            # 🛒 FIX: Added quantities, removed prices from individual items
             st.write(f"**Your Items ({len(items)})**")
             for i in items:
-                # Label format: "2 pints Milk"
                 label = f"{i.get('quantity', '')} {i['item']}"
                 st.checkbox(label, key=i['item'])
                 
