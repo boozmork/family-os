@@ -66,7 +66,7 @@ def force_refresh():
         del st.session_state['family_data']
     st.session_state['family_data'] = get_data_cached()
 
-# --- 5. AGENT LOGIC (UPDATED FOR VARIETY) ---
+# --- 5. AGENT LOGIC ---
 ALL_STYLES = [
     "Jamie Oliver 15-Minute Meals (Quick, fresh, rustic)",
     "Ottolenghi (Middle Eastern, veg-heavy, complex spices)",
@@ -83,44 +83,29 @@ ALL_STYLES = [
 ]
 
 def get_style_preferences(family_data):
-    """
-    Instead of picking ONE style, we now return the data so the AI can mix it up.
-    """
     prefs = family_data.get('style_preferences', {})
     favorites = [s for s in ALL_STYLES if prefs.get(s, 0) > 2]
     disliked = [s for s in ALL_STYLES if prefs.get(s, 0) < -1]
-    
     return favorites, disliked
 
 def generate_week_plan():
     data = get_data_cached()
     schedule = {"Monday": [], "Tuesday": ["Busy"], "Wednesday": [], "Thursday": [], "Friday": [], "Saturday": [], "Sunday": []}
-    
-    # Get the lists, don't pick just one
     favorites, disliked = get_style_preferences(data)
     
     prompt = f"""
     You are a professional family meal planner for a UK family.
     Plan a 7-day menu (Mon-Sun).
     
-    CRITICAL RULES FOR MEAL TYPES:
-    1. **BREAKFAST**: Must be standard UK/Western style (Toast, Cereal, Porridge, Eggs, Yoghurt, Pancakes). NO soups, rice, or dinner leftovers.
-    2. **LUNCH**: Must be "Packed Lunch" friendly (Sandwiches, Wraps, Salads, Soup) or simple weekend light meals.
-    3. **DINNER**: This is where you show off.
+    RULES:
+    1. BREAKFAST: Standard UK/Western (Toast, Cereal, Eggs).
+    2. LUNCH: Packed Lunch friendly or Light.
+    3. DINNER: Varied styles. DO NOT repeat cuisines.
     
-    CRITICAL RULES FOR VARIETY:
-    1. **DO NOT** use the same cuisine twice in a row.
-    2. **DO NOT** make the whole week one theme (e.g. No "Asian Week").
-    3. **Mix it up**: Aim for 7 different styles across 7 days.
-    
-    USER PREFERENCES:
-    - LOVES: {", ".join(favorites) if favorites else "Open to anything"}
-    - HATES (Avoid these): {", ".join(disliked) if disliked else "None"}
-    - AVAILABLE STYLES TO PICK FROM: {", ".join(ALL_STYLES)}
-    
-    SCHEDULE CONTEXT:
-    {json.dumps(schedule)}
-    (If day is 'Busy', dinner must be <20 mins).
+    PREFERENCES:
+    - LOVES: {", ".join(favorites) if favorites else "Any"}
+    - HATES: {", ".join(disliked) if disliked else "None"}
+    - STYLES: {", ".join(ALL_STYLES)}
     
     OUTPUT JSON:
     {{
@@ -129,14 +114,13 @@ def generate_week_plan():
           "day": "Monday",
           "meals": {{
             "breakfast": {{ "name": "...", "ingredients": ["..."], "method": "...", "style_tag": "Western" }},
-            "lunch": {{ "name": "...", "ingredients": ["..."], "method": "...", "style_tag": "Packed Lunch" }},
+            "lunch": {{ "name": "...", "ingredients": ["..."], "method": "...", "style_tag": "Packed" }},
             "dinner": {{ "name": "...", "ingredients": ["..."], "method": "...", "style_tag": "Italian" }}
           }}
         }}
       ]
     }}
     """
-    
     try:
         res = client.chat.completions.create(
             model="gpt-4o",
@@ -148,6 +132,49 @@ def generate_week_plan():
     except Exception as e:
         st.error(f"AI Error: {e}")
 
+# --- NEW: ON-DEMAND RECIPE GENERATOR ---
+def generate_recipe_instructions(meal_name, ingredients, style):
+    """Generates detailed steps only when requested"""
+    prompt = f"""
+    Write a cooking guide for "{meal_name}".
+    Style: {style}
+    Ingredients available: {", ".join(ingredients)}
+    
+    OUTPUT JSON:
+    {{
+        "steps": [
+            "Step 1: ...",
+            "Step 2: ...",
+            "Step 3: ..."
+        ],
+        "tips": "Chef's secret tip..."
+    }}
+    Provide 5-8 concise steps.
+    """
+    try:
+        res = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={ "type": "json_object" }
+        )
+        return json.loads(res.choices[0].message.content)
+    except:
+        return {"steps": ["Could not generate recipe."], "tips": ""}
+
+def save_recipe_to_db(day_name, meal_type, recipe_data):
+    """Saves the generated recipe to the specific meal slot so we don't regen it"""
+    data = get_data_cached()
+    plan = data.get('current_week_plan', {})
+    
+    for day in plan.get('days', []):
+        if day['day'] == day_name:
+            day['meals'][meal_type]['recipe_details'] = recipe_data
+            break
+            
+    db.collection("families").document("fam_8829_xyz").update({"current_week_plan": plan})
+
+# ----------------------------------------
+
 def generate_shopping_list(plan):
     all_ing = []
     for day in plan.get('days', []):
@@ -156,9 +183,9 @@ def generate_shopping_list(plan):
                 all_ing.extend(m.get('ingredients', []))
                 
     prompt = f"""
-    1. Consolidate list: {", ".join(all_ing)}
+    1. Consolidate: {", ".join(all_ing)}
     2. Estimate UK Price (GBP).
-    3. JSON Output: {{ "items": [ {{ "item": "Milk", "quantity": "4pts", "est_price": 1.50 }} ] }}
+    3. JSON: {{ "items": [ {{ "item": "Milk", "quantity": "4pts", "est_price": 1.50 }} ] }}
     """
     try:
         res = client.chat.completions.create(
@@ -184,8 +211,6 @@ def rate_meal(name, rating, user, style):
     fam_ref = db.collection("families").document("fam_8829_xyz")
     data = get_data_cached() 
     prefs = data.get("style_preferences", {})
-    
-    # Fuzzy match the style tag to our master list
     matched = next((s for s in ALL_STYLES if style.split(" ")[0] in s), None)
     if matched:
         score = prefs.get(matched, 0)
@@ -281,6 +306,28 @@ else:
                         st.caption(m_data.get('method', ''))
                         st.text(f"Ing: {', '.join(m_data.get('ingredients', []))}")
                         
+                        # --- RECIPE EXPANDER ---
+                        # If we have details, show them. If not, show button.
+                        if 'recipe_details' in m_data:
+                            with st.expander("👨‍🍳 Method (Step-by-Step)", expanded=False):
+                                details = m_data['recipe_details']
+                                for idx, step in enumerate(details.get('steps', [])):
+                                    st.write(f"**{idx+1}.** {step}")
+                                if details.get('tips'):
+                                    st.info(f"💡 **Tip:** {details['tips']}")
+                        else:
+                            if st.button("👨‍🍳 Get Recipe", key=f"rec_{d_name}_{m_type}"):
+                                with st.spinner("Writing recipe..."):
+                                    details = generate_recipe_instructions(
+                                        m_data['name'], 
+                                        m_data.get('ingredients', []), 
+                                        m_data.get('style_tag', 'General')
+                                    )
+                                    save_recipe_to_db(d_name, m_type, details)
+                                    force_refresh()
+                                    st.rerun()
+                        # -----------------------
+
                         b1, b2 = st.columns(2)
                         if b1.button("👍", key=f"u_{d_name}_{m_type}"):
                              rate_meal(m_data['name'], "like", user['name'], m_data.get('style_tag', 'General'))
